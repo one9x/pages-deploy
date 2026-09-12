@@ -1,0 +1,79 @@
+# The action's own CI. Two halves, and the second is the one that matters.
+#
+# `unit` runs the argv/output assertions against the script extracted from
+# action.yml itself, so it cannot drift from what ships. It needs no secret and
+# therefore runs on forks.
+#
+# `live` uses the action to deploy a real fixture to a real One9x site — the only
+# test that proves the whole chain (installer, token, portal, edge) still works.
+# It is skipped without the secret, which is what makes fork PRs pass instead of
+# failing on something a contributor cannot fix.
+name: test
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y python3-yaml
+      - run: ./test/run.sh
+
+  live:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: secret
+        run: echo "present=${{ secrets.ONE9X_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+      # Never --deploy. This deploys the fixture to a throwaway site and leaves
+      # it staged: the run proves the path works without a green tick being the
+      # thing that changes what a site serves.
+      - id: staged
+        if: steps.secret.outputs.present == 'true'
+        uses: ./
+        with:
+          site: ${{ vars.TEST_SITE || 'action-test' }}
+          dir: test/fixture
+          token: ${{ secrets.ONE9X_TOKEN }}
+
+      - if: steps.secret.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          # Assert on the OUTPUTS, not just on the exit code: a step that
+          # succeeds while handing back an empty URL is the failure worth
+          # catching, and it is invisible to `set -e`.
+          test -n "${{ steps.staged.outputs.preview-url }}" || {
+            echo "::error::no preview-url returned"; exit 1; }
+          test -z "${{ steps.staged.outputs.url }}" || {
+            echo "::error::url should be empty for a staged release"; exit 1; }
+          test "${{ steps.staged.outputs.live }}" = 'false' || {
+            echo "::error::a staged release must not be live"; exit 1; }
+          echo "staged at ${{ steps.staged.outputs.preview-url }}"
+
+      # Immediately re-deploying the identical fixture must be recognised as a
+      # no-op rather than stacking a second release. Until the portal ships the
+      # `unchanged` flag this only asserts the version is stable, which is the
+      # half that is true today.
+      - id: again
+        if: steps.secret.outputs.present == 'true'
+        uses: ./
+        with:
+          site: ${{ vars.TEST_SITE || 'action-test' }}
+          dir: test/fixture
+          token: ${{ secrets.ONE9X_TOKEN }}
+
+      - if: steps.secret.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          test "${{ steps.again.outputs.version }}" = "${{ steps.staged.outputs.version }}" || {
+            echo "::error::identical content produced a different version — the release id is supposed to be a content hash"
+            exit 1; }
+          echo "re-deploy produced the same version, as it must"
+
+      - if: steps.secret.outputs.present != 'true'
+        run: echo "::notice::ONE9X_TOKEN is not set, so the live deploy test was skipped."

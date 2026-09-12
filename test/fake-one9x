@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stands in for the real CLI: records the exact argv it was handed, then prints
+# whatever JSON the test asked for.
+printf '%s\n' "$@" > "$ARGV_OUT"
+cat "$JSON_IN"
