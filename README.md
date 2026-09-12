@@ -12,26 +12,26 @@ Deploy a folder to [One9x Pages](https://one9x.com) and get the URL back.
 
 ## Setup, once
 
-No One9x CLI yet? `curl -fsSL https://get.one9x.com | sh`, then `one9x login`.
-
-**1. Create the site.** The action deploys to a site that already exists — it
-will not create one for you.
-
-```sh
-one9x pages create mysite
-```
-
-**2. Mint a token** and store the printed secret as a repository secret named
-`ONE9X_TOKEN` (Settings → Secrets and variables → Actions).
+Two things: a **site** to deploy to, and a **token** for CI. Both can be done
+from the dashboard at [portal.one9x.com](https://portal.one9x.com) or from the
+CLI — the CLI is two commands, so it is the shorter path from here:
 
 ```sh
+one9x pages create mysite            # the action deploys to a site that already
+                                     # exists; it will not create one for you
 one9x tokens create "github actions"
 ```
 
-The secret is shown once. **Tokens expire after 90 days** — `one9x tokens extend
-<id>` pushes that out without changing the secret, so nothing has to be
-re-stored. A silently expired token is the most likely way a working deploy
-starts failing months later.
+Store the printed token as a repository secret named **`ONE9X_TOKEN`** (Settings
+→ Secrets and variables → Actions). It is shown once.
+
+**Tokens expire after 90 days.** `one9x tokens extend <id>` pushes that out
+without changing the secret, so nothing has to be re-stored — and a silently
+expired token is the most likely way a working deploy starts failing months
+later.
+
+New to One9x? `curl -fsSL https://get.one9x.com | sh`, then `one9x login`.
+Everything else is in the [docs](https://one9x.com/docs).
 
 ## Preview on every PR, publish on merge
 
