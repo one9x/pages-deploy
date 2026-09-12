@@ -31,9 +31,12 @@ inputs:
 
   deploy:
     description: >-
-      Publish immediately. Leave false to stage and get a preview URL instead.
-      This is a string, not a boolean, so any expression that renders "true"
-      works — e.g. ${{ github.ref == 'refs/heads/main' }}.
+      Publish immediately, or leave false to stage and get a preview URL.
+      Must be exactly true or false. Input values are strings, so a workflow
+      expression that renders true — a ref comparison, say — is the usual way to
+      publish only from the default branch. (No example expression here on
+      purpose: descriptions are templated, so one would be compiled rather than
+      shown. The README has it.)
     default: 'false'
   spa:
     description: 'Serve /index.html for unknown paths (single-page apps). Mutually exclusive with `index`.'
@@ -291,8 +294,10 @@ runs:
         fi
 
         # Bash parameter expansion, not envsubst or sed: the values are URLs and
-        # hashes, and sed would treat & and / in them as syntax. Single braces
-        # because ${{ }} already belongs to GitHub.
+        # hashes, and sed would treat & and / in them as syntax. The placeholders
+        # use SINGLE braces because the doubled form is GitHub's expression
+        # syntax — and note it is compiled inside run blocks too, comments
+        # included, so the doubled form cannot even be written here.
         body="${tpl//\{site\}/$SITE}"
         body="${body//\{url\}/$URL}"
         body="${body//\{preview_url\}/$PREVIEW_URL}"

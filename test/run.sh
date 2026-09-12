@@ -12,6 +12,10 @@ export PATH="$PWD/test:$tmp/bin:$PATH"
 mkdir -p "$tmp/bin"
 ln -sf "$PWD/test/fake-one9x" "$tmp/bin/one9x"
 
+# The template lint first: if action.yml will not compile, nothing below it is
+# meaningful — the runner never reaches the script.
+if python3 test/lint.py; then pass=$((pass+1)); else fail=$((fail+1)); fi
+
 python3 test/extract.py 'Release' > "$tmp/release.sh"
 
 ok()  { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
