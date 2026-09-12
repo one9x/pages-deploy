@@ -121,8 +121,12 @@ reviewer approved is byte-identical to what goes live.
 
 `comment: true` posts one comment and **updates that same comment** on every
 later push, so a long PR does not collect a wall of them. It needs
-`permissions: pull-requests: write`; if that is missing the deploy still succeeds
-and you get a warning rather than a failed build.
+`permissions: pull-requests: write`.
+
+If you ask for a comment and it cannot be posted, **the job fails** — a green run
+with no preview link is the failure nobody investigates. The one exception is a
+pull request from a fork, where GitHub issues a read-only token by design;
+commenting is skipped there rather than failed.
 
 Override the body with `comment-template`. Placeholders are `{site}`, `{url}`,
 `{preview_url}`, `{version}`, `{seq}` and `{commit}` — single braces, because
@@ -167,6 +171,12 @@ environment name is an error.)
 
 ## Notes
 
+- **Misconfiguration fails the build, it never degrades.** Boolean inputs must be
+  exactly `true` or `false` — `deploy: yes` is rejected rather than read as
+  false, because the symptom of the latter is a release that quietly stages when
+  you meant to publish. Passing both `spa` and `index` is refused before your
+  files are hashed. A missing token, a missing `dir`, or a comment that cannot be
+  posted all stop the run and name the fix.
 - **Linux and macOS runners.** The installer is a POSIX shell script; Windows
   runners are not supported.
 - **Nothing changed?** Re-deploying identical content does not create a new

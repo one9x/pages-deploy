@@ -129,6 +129,9 @@ runs:
         ERROR_PAGES: ${{ inputs.error-pages }}
         EXCLUDE: ${{ inputs.exclude }}
         TAG: ${{ inputs.tag }}
+        # Validated here rather than in the comment step: that step's `if:`
+        # cannot fail, so a typo'd value would skip commenting in silence.
+        COMMENT: ${{ inputs.comment }}
       run: |
         set -euo pipefail
 
@@ -144,6 +147,30 @@ runs:
         fi
         if [ ! -d "$DIR" ]; then
           echo "::error::dir '$DIR' does not exist. Did the build step run, and is this the folder it wrote?"
+          exit 1
+        fi
+
+        # Booleans are checked rather than coerced. `deploy: yes` and
+        # `deploy: 1` are the obvious things to write and both compare unequal
+        # to 'true', so a permissive `[ "$X" = true ]` would read them as false
+        # and QUIETLY STAGE a release that was meant to go live — a
+        # misconfiguration whose only symptom is the site not changing. Fail
+        # instead, and say what was passed.
+        boolean() {
+          case "$2" in
+            true|false) ;;
+            *) echo "::error::input '$1' must be exactly true or false, got '$2'. Anything else would be read as false — for 'deploy' that silently stages instead of publishing."
+               exit 1 ;;
+          esac
+        }
+        boolean deploy "$DEPLOY"
+        boolean spa "$SPA"
+        boolean comment "$COMMENT"
+
+        # The CLI rejects this too, but only after the whole directory has been
+        # hashed; catching it here costs nothing and fails in under a second.
+        if [ "$SPA" = 'true' ] && [ -n "$INDEX" ]; then
+          echo "::error::'spa' and 'index' are the same setting — pass one, not both."
           exit 1
         fi
 
@@ -217,10 +244,14 @@ runs:
           if [ -n "$VERSION" ]; then echo "- **Version:** \`$VERSION\`"; fi
         } >> "$GITHUB_STEP_SUMMARY"
 
-    # Off a pull request there is nothing to comment on, so the `if` covers both
-    # the opt-out and the wrong-event case.
+    # Three conditions, and the third is not an opt-out. A pull request from a
+    # FORK gets a read-only github.token by GitHub's design, so commenting
+    # cannot work there and never will — that is a platform boundary, not a
+    # setup mistake, and failing a contributor's PR over it would be wrong.
+    # Everywhere else, asking for a comment and not getting one IS a setup
+    # mistake, and the step below fails rather than warns.
     - name: Comment the preview on the PR
-      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork != true }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -278,17 +309,23 @@ runs:
         # comment body and markdown would render the first line as code.
         body="$marker"$'\n'"$body"
 
-        warn() {
-          echo "::warning::the deploy succeeded but the PR comment could not be posted. Add 'permissions: pull-requests: write' to the workflow (or job) if it is missing."
+        die() {
+          echo "::error::comment: true was set, but the comment could not be posted. The usual cause is a missing permission — add this to the workflow or the job:"
+          echo "::error::  permissions:"
+          echo "::error::    pull-requests: write"
+          echo "::error::The deploy itself succeeded; only the comment failed."
+          exit 1
         }
 
-        # THE COMMENT MUST NEVER FAIL THE JOB. The deploy already happened; a
-        # missing permission is not a reason to report a red build for a site
-        # that is live.
+        # A failed comment FAILS THE JOB. Asking for a comment and silently not
+        # getting one is the failure mode worth catching: the deploy looks fine,
+        # the PR just quietly has no preview link, and nobody investigates a
+        # green run. (Forks are excluded by the step's `if:` above — there it is
+        # a platform limit rather than a misconfiguration.)
         id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-               --jq "[.[] | select(.body | startswith(\"$marker\"))] | first | .id // empty" 2>/dev/null || true)
+               --jq "[.[] | select(.body | startswith(\"$marker\"))] | first | .id // empty") || die
         if [ -n "$id" ]; then
-          gh api --method PATCH "repos/$REPO/issues/comments/$id" -f body="$body" --silent || warn
+          gh api --method PATCH "repos/$REPO/issues/comments/$id" -f body="$body" --silent || die
         else
-          gh api --method POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent || warn
+          gh api --method POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent || die
         fi

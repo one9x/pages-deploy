@@ -24,7 +24,7 @@ run() {
   : > "$tmp/argv"; : > "$tmp/out"
   ARGV_OUT="$tmp/argv" JSON_IN="$tmp/json" GITHUB_OUTPUT="$tmp/out" \
   ONE9X_TOKEN="tok" SITE="mysite" DIR="$tmp/dist" \
-  DEPLOY="false" SPA="false" INDEX="" ERROR_PAGES="" EXCLUDE="" TAG="" \
+  DEPLOY="false" SPA="false" COMMENT="false" INDEX="" ERROR_PAGES="" EXCLUDE="" TAG="" \
   env "$@" bash "$tmp/release.sh" >/dev/null 2>&1
   rc=$?
   ARGV=$(cat "$tmp/argv" 2>/dev/null)
@@ -110,6 +110,29 @@ grep -qx 'unchanged=true' <<< "$OUT" && ok "unchanged passes through when presen
 # --- refusals name the fix -------------------------------------------------
 run "$J" ONE9X_TOKEN="" && no "empty token must fail" "exit 0" || ok "empty token fails"
 run "$J" DIR="$tmp/nope" && no "missing dir must fail" "exit 0" || ok "missing dir fails"
+
+# CONFIGURATION ERRORS FAIL, THEY DO NOT DEGRADE. `deploy: yes` compares unequal
+# to 'true', so a permissive check would read it as false and quietly STAGE a
+# release meant to go live — a misconfiguration whose only symptom is the site
+# not changing. Same for a value that merely looks boolean.
+for bad in yes no 1 0 True TRUE ""; do
+  if run "$J" DEPLOY="$bad"; then
+    no "deploy=$bad must fail" "exited 0"
+  else
+    ok "deploy=${bad:-<empty>} is rejected, not coerced"
+  fi
+done
+run "$J" SPA=yes  && no "spa=yes must fail" "exited 0"  || ok "spa=yes is rejected"
+run "$J" COMMENT=1 && no "comment=1 must fail" "exited 0" || ok "comment=1 is rejected"
+
+# …and the valid values still work, so the guard has not become a wall.
+run "$J" DEPLOY=true  && ok "deploy=true still accepted"  || no "deploy=true" "rejected a valid value"
+run "$J" DEPLOY=false && ok "deploy=false still accepted" || no "deploy=false" "rejected a valid value"
+
+# spa and index are the same slot; passing both is a setup error, caught before
+# the directory is hashed rather than after.
+run "$J" SPA=true INDEX=/install.sh && no "spa+index must fail" "exited 0" \
+                                    || ok "spa and index together are rejected"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -6,8 +6,13 @@
 #
 # `live` uses the action to deploy a real fixture to a real One9x site — the only
 # test that proves the whole chain (installer, token, portal, edge) still works.
-# It is skipped without the secret, which is what makes fork PRs pass instead of
-# failing on something a contributor cannot fix.
+#
+# A MISSING SECRET FAILS THIS JOB. It used to skip, and a skipped step still
+# reports success, so the run went green having never once executed the action —
+# which is exactly the kind of green that teaches people to trust a tick that
+# means nothing. The one exception is a pull request from a FORK: GitHub does not
+# expose secrets there by design, so the whole job is skipped rather than failed,
+# because that is a platform boundary and not something a contributor did wrong.
 name: test
 on:
   push:
@@ -23,26 +28,32 @@ jobs:
 
   live:
     needs: unit
+    if: github.event.pull_request.head.repo.fork != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - id: secret
-        run: echo "present=${{ secrets.ONE9X_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+      - name: Require the deploy secret
+        env:
+          ONE9X_TOKEN: ${{ secrets.ONE9X_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ONE9X_TOKEN:-}" ]; then
+            echo "::error::ONE9X_TOKEN is not set, so the action has never been run against a real portal. Create a site with 'one9x pages create action-test', mint a token with 'one9x tokens create \"pages-deploy ci\"', and store it at Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
 
       # Never --deploy. This deploys the fixture to a throwaway site and leaves
       # it staged: the run proves the path works without a green tick being the
       # thing that changes what a site serves.
       - id: staged
-        if: steps.secret.outputs.present == 'true'
         uses: ./
         with:
           site: ${{ vars.TEST_SITE || 'action-test' }}
           dir: test/fixture
           token: ${{ secrets.ONE9X_TOKEN }}
 
-      - if: steps.secret.outputs.present == 'true'
-        run: |
+      - run: |
           set -euo pipefail
           # Assert on the OUTPUTS, not just on the exit code: a step that
           # succeeds while handing back an empty URL is the failure worth
@@ -60,20 +71,15 @@ jobs:
       # `unchanged` flag this only asserts the version is stable, which is the
       # half that is true today.
       - id: again
-        if: steps.secret.outputs.present == 'true'
         uses: ./
         with:
           site: ${{ vars.TEST_SITE || 'action-test' }}
           dir: test/fixture
           token: ${{ secrets.ONE9X_TOKEN }}
 
-      - if: steps.secret.outputs.present == 'true'
-        run: |
+      - run: |
           set -euo pipefail
           test "${{ steps.again.outputs.version }}" = "${{ steps.staged.outputs.version }}" || {
             echo "::error::identical content produced a different version — the release id is supposed to be a content hash"
             exit 1; }
           echo "re-deploy produced the same version, as it must"
-
-      - if: steps.secret.outputs.present != 'true'
-        run: echo "::notice::ONE9X_TOKEN is not set, so the live deploy test was skipped."
